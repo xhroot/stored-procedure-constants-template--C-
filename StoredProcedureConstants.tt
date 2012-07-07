@@ -1,19 +1,32 @@
 ﻿<#@ template language="C#" hostspecific="True" #>
 <#@ assembly name="EnvDTE" #>
 <#@ assembly name="System.Data" #>
+<#@ assembly name="System.Core" #>
 <#@ assembly name="System.Configuration" #>
 <#@ import namespace="System.Configuration" #>
 <#@ import namespace="System.Collections.Generic" #>
 <#@ import namespace="System.Data.SqlClient" #>
 <#@ import namespace="System.IO" #>
+<#@ import namespace="System.Linq" #>
 <#
-// This template will create a const string to reference each stored procedure.
+// This template will create a class with const string references to each 
+// stored procedure.
 
-// Use this section to configure information specific to your setup.
+//------------------------------------------------------------------------------
+// Use this section to configure information specific to setup.
 var _namespace = "Name.Space";
 var _class = "SP";
 var database = "test001";
 var configPath = Path.Combine(Host.ResolvePath(@".\"), "Web.{0}.config");
+var connectionStringKey = "test001ConnectionString";
+var prependSchema = true;
+
+// Add filters appropriate to environment.
+Func<string, string> applyNamingFilters = x => x
+  .Replace(" ", "_")
+  .Replace("-", "_")
+  .Replace(".", "$");
+//------------------------------------------------------------------------------
 
 // Select config file based on current build type.
 var serviceProvider = Host as IServiceProvider;
@@ -27,7 +40,18 @@ var config = ConfigurationManager.OpenMappedExeConfiguration(
 	ConfigurationUserLevel.None);
 
 var connectionString = config.ConnectionStrings
-	.ConnectionStrings["test001ConnectionString"].ConnectionString;
+	.ConnectionStrings[connectionStringKey].ConnectionString;
+
+// Retrieves list of stored procedures. Applies naming transformations and 
+// removes duplicates. In the case where filters produce identical stored proc 
+// names, one of them will be selected - consider it arbitrary - and the rest 
+// omitted. To reduce omissions, adjust the naming filter function, prepend
+// the schema, or choose saner SQL object names.
+
+var storedProcs = GetStoredProcedures(database, connectionString, prependSchema)
+  .Select(x => new Tuple<string, string>(applyNamingFilters(x), x))
+  .GroupBy(x => x.Item1)
+  .Select(g => g.First());
 
 #>
 //------------------------------------------------------------------------------
@@ -45,30 +69,30 @@ namespace <#=_namespace#>
 {
   internal static class <#=_class#>
   {
-		<# foreach(var sp in GetStoredProcedures(database, connectionString)) { #>
-		internal const string <#=sp#> = "<#=sp#>";
-		<# } #>
-	}
+    <# foreach(var sp in storedProcs) { #>
+    internal const string <#=sp.Item1#> = "<#=sp.Item2#>";
+    <# } #>
+  }
 }
 
 <#+
-private IEnumerable<string> GetStoredProcedures(string databaseName, 
-	string connectionString)
+private IEnumerable<string> GetStoredProcedures(string databaseName,
+  string connectionString, bool prependSchema)
 {
   var storedProcs = new List<string>();
-  using(var conn = new SqlConnection(connectionString))
-	{
-		conn.Open();
-		var cmd = conn.CreateCommand();
-		cmd.CommandText = string.Format("SELECT ROUTINE_NAME FROM {0}.INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_TYPE = 'PROCEDURE'",
-				databaseName);
-		var reader = cmd.ExecuteReader();
+  using (var conn = new SqlConnection(connectionString))
+  {
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = string.Format("SELECT {0} ROUTINE_NAME AS storedProc FROM {1}.INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_TYPE = 'PROCEDURE'",
+        prependSchema ? "ROUTINE_SCHEMA + " : "", databaseName);
+    var reader = cmd.ExecuteReader();
 
-		while (reader.Read())
-			storedProcs.Add(reader["ROUTINE_NAME"] as string);
+    while (reader.Read())
+      storedProcs.Add(reader["storedProc"] as string);
 
-		reader.Close();
-	}
+    reader.Close();
+  }
   return storedProcs;
 }
 #>
